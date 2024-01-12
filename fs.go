@@ -100,28 +100,21 @@ type FakeFileSystem struct {
 
 var _ FileSystem = (*FakeFileSystem)(nil)
 
+// default umask on common Linux systems
 const umask = 0022
 
-func (m *FakeFileSystem) createFile(path string, flag int, perm fs.FileMode) (File, error) {
-	path = filepath.Clean(path)
-
-	if path[len(path)-1] == '/' {
-		return nil, &os.PathError{
-			Op:   "open",
-			Path: path,
-			Err:  syscall.EISDIR,
-		}
-	}
+func (m *FakeFileSystem) createFile(uncleanedPath string, flag int, perm fs.FileMode) (File, error) {
+	path := filepath.Clean(uncleanedPath)
 
 	if f, ok := m.contents[path]; ok {
 		if f.isDir {
 			return nil, &os.PathError{
 				Op:   "open",
-				Path: path,
+				Path: uncleanedPath,
 				Err:  syscall.EISDIR,
 			}
 		}
-		// @todo: are we allowed to open and truncate the file? (check perms)
+		// @todo(perms): are we allowed to open and truncate the file? (check perms)
 		f.bytes = nil
 		f.lastMod = Time()
 		return &FakeFileDescriptor{
@@ -131,17 +124,25 @@ func (m *FakeFileSystem) createFile(path string, flag int, perm fs.FileMode) (Fi
 		}, nil
 	}
 
+	if path[len(path)-1] == '/' {
+		return nil, &os.PathError{
+			Op:   "open",
+			Path: uncleanedPath,
+			Err:  syscall.EISDIR,
+		}
+	}
+
 	parentPath := filepath.Dir(path)
 	if p, ok := m.contents[parentPath]; ok {
 		if !p.isDir {
 			return nil, &os.PathError{
 				Op:   "open",
-				Path: path,
+				Path: uncleanedPath,
 				Err:  syscall.ENOTDIR,
 			}
 		}
 
-		// @todo: are we allowed to create the file? (check perms of directory)
+		// @todo(perms): are we allowed to create the file? (check perms of directory)
 		f := &FakeFile{
 			isDir:   false,
 			path:    path,
@@ -161,7 +162,7 @@ func (m *FakeFileSystem) createFile(path string, flag int, perm fs.FileMode) (Fi
 
 	return nil, &os.PathError{
 		Op:   "open",
-		Path: path,
+		Path: uncleanedPath,
 		Err:  syscall.ENOENT,
 	}
 }
@@ -170,10 +171,10 @@ func (m *FakeFileSystem) Create(path string) (File, error) {
 	return m.createFile(path, os.O_RDWR, 0666)
 }
 
-func (m *FakeFileSystem) Open(path string) (File, error) {
-	path = filepath.Clean(path)
+func (m *FakeFileSystem) Open(uncleanedPath string) (File, error) {
+	path := filepath.Clean(uncleanedPath)
 	if f, ok := m.contents[path]; ok {
-		// @todo: are we allowed to open the file (check perms)
+		// @todo(perms): are we allowed to open the file (check perms)
 		return &FakeFileDescriptor{
 			file:   f,
 			cursor: 0,
@@ -182,26 +183,26 @@ func (m *FakeFileSystem) Open(path string) (File, error) {
 	}
 	return nil, &os.PathError{
 		Op:   "open",
-		Path: path,
+		Path: uncleanedPath,
 		Err:  syscall.ENOENT,
 	}
 }
 
-func (m *FakeFileSystem) OpenFile(path string, flag int, perm os.FileMode) (File, error) {
-	cpath := filepath.Clean(path)
-	if f, ok := m.contents[cpath]; ok {
-		// @todo: are we allowed to open the file? (check perms)
+func (m *FakeFileSystem) OpenFile(uncleanedPath string, flag int, perm os.FileMode) (File, error) {
+	path := filepath.Clean(uncleanedPath)
+	if f, ok := m.contents[path]; ok {
+		// @todo(perms): are we allowed to open the file? (check perms)
 		if f.isDir {
 			return nil, &os.PathError{
 				Op:   "open",
-				Path: cpath,
+				Path: uncleanedPath,
 				Err:  syscall.EISDIR,
 			}
 		}
 		if (flag&os.O_CREATE) == 1 && (flag&os.O_EXCL) == 1 {
 			return nil, &os.PathError{
 				Op:   "open",
-				Path: cpath,
+				Path: uncleanedPath,
 				Err:  syscall.EEXIST,
 			}
 		}
@@ -215,25 +216,25 @@ func (m *FakeFileSystem) OpenFile(path string, flag int, perm os.FileMode) (File
 		}, nil
 	}
 	if (flag & os.O_CREATE) == 1 {
-		// @todo: are we allowed to create the file? (check perms of directory)
+		// @todo(perms): are we allowed to create the file? (check perms of directory)
 		if path[len(path)-1] == '/' {
 			return nil, &os.PathError{
 				Op:   "open",
-				Path: cpath,
+				Path: uncleanedPath,
 				Err:  syscall.EISDIR,
 			}
 		}
-		return m.createFile(cpath, flag, perm)
+		return m.createFile(uncleanedPath, flag, perm)
 	}
 	return nil, &os.PathError{
 		Op:   "open",
-		Path: cpath,
+		Path: uncleanedPath,
 		Err:  syscall.ENOENT,
 	}
 }
 
-func (m *FakeFileSystem) Stat(path string) (fs.FileInfo, error) {
-	path = filepath.Clean(path)
+func (m *FakeFileSystem) Stat(uncleanedPath string) (fs.FileInfo, error) {
+	path := filepath.Clean(uncleanedPath)
 	if f, ok := m.contents[path]; ok {
 		return &FakeFileDescriptor{
 			file:   f,
@@ -243,7 +244,7 @@ func (m *FakeFileSystem) Stat(path string) (fs.FileInfo, error) {
 	}
 	return nil, &os.PathError{
 		Op:   "stat",
-		Path: path,
+		Path: uncleanedPath,
 		Err:  syscall.ENOENT,
 	}
 }
@@ -283,24 +284,27 @@ func walkDir(d *FakeFile, fn fs.WalkDirFunc) error {
 				flag:   os.O_RDONLY,
 			}, nil)
 		}
+		if err == fs.SkipDir {
+			return nil // successfully skipped rest of directory
+		}
 		if err != nil {
-			if err == fs.SkipDir {
-				return nil // successfully skipped rest of directory
-			}
 			return err
 		}
 	}
 	return nil
 }
 
-func (m *FakeFileSystem) WalkDir(root string, fn fs.WalkDirFunc) (err error) {
+func (m *FakeFileSystem) WalkDir(uncleanedRoot string, fn fs.WalkDirFunc) (err error) {
 	// @fixme: the path passed to fn should always have root as prefix
-	root = filepath.Clean(root)
+	root := filepath.Clean(uncleanedRoot)
 	r, ok := m.contents[root]
+
+	// @todo(perms): maybe we aren't allowed to open some dirs/files?
+
 	if !ok {
 		err = &os.PathError{
 			Op:   "lstat",
-			Path: root,
+			Path: uncleanedRoot,
 			Err:  syscall.ENOENT,
 		}
 	}
@@ -321,32 +325,34 @@ func (m *FakeFileSystem) WalkDir(root string, fn fs.WalkDirFunc) (err error) {
 	return err
 }
 
-func (m *FakeFileSystem) Truncate(path string, size int64) error {
+func (m *FakeFileSystem) Truncate(uncleanedPath string, size int64) error {
+	path := filepath.Clean(uncleanedPath)
 	if f, ok := m.contents[path]; ok {
 		if f.isDir {
 			return &os.PathError{
 				Op:   "truncate",
-				Path: path,
+				Path: uncleanedPath,
 				Err:  syscall.EISDIR,
 			}
 		}
+		// @todo(perm): check permissions
 		f.bytes = f.bytes[:size]
 		return nil
 	}
 	return &os.PathError{
 		Op:   "truncate",
-		Path: path,
+		Path: uncleanedPath,
 		Err:  syscall.ENOENT,
 	}
 }
 
-func (m *FakeFileSystem) ReadFile(path string) ([]byte, error) {
-	path = filepath.Clean(path)
+func (m *FakeFileSystem) ReadFile(uncleanedPath string) ([]byte, error) {
+	path := filepath.Clean(uncleanedPath)
 	if f, ok := m.contents[path]; ok {
 		if f.isDir {
 			return nil, &os.PathError{
 				Op:   "read",
-				Path: path,
+				Path: uncleanedPath,
 				Err:  syscall.EISDIR,
 			}
 		}
@@ -354,18 +360,18 @@ func (m *FakeFileSystem) ReadFile(path string) ([]byte, error) {
 	}
 	return nil, &os.PathError{
 		Op:   "open",
-		Path: path,
+		Path: uncleanedPath,
 		Err:  syscall.ENOENT,
 	}
 }
 
-func (m *FakeFileSystem) WriteFile(path string, data []byte, perm os.FileMode) error {
-	path = filepath.Clean(path)
+func (m *FakeFileSystem) WriteFile(uncleanedPath string, data []byte, perm os.FileMode) error {
+	path := filepath.Clean(uncleanedPath)
 	if f, ok := m.contents[path]; ok {
 		if f.isDir {
 			return &os.PathError{
 				Op:   "open",
-				Path: path,
+				Path: uncleanedPath,
 				Err:  syscall.EISDIR,
 			}
 		}
@@ -374,10 +380,11 @@ func (m *FakeFileSystem) WriteFile(path string, data []byte, perm os.FileMode) e
 	}
 	parentPath := filepath.Dir(path)
 	if p, ok := m.contents[parentPath]; ok {
+		// @todo(perms): check folder perms
 		if !p.isDir {
 			return &os.PathError{
 				Op:   "open",
-				Path: path,
+				Path: uncleanedPath,
 				Err:  syscall.ENOTDIR,
 			}
 		}
@@ -396,41 +403,45 @@ func (m *FakeFileSystem) WriteFile(path string, data []byte, perm os.FileMode) e
 	}
 	return &os.PathError{
 		Op:   "open",
-		Path: path,
+		Path: uncleanedPath,
 		Err:  syscall.ENOENT,
 	}
 }
 
-func (m *FakeFileSystem) Remove(path string) error {
-	path = filepath.Clean(path)
+func (m *FakeFileSystem) Remove(uncleanedPath string) error {
+	path := filepath.Clean(uncleanedPath)
 	if f, ok := m.contents[path]; ok {
 		if f == m.root {
 			return &os.PathError{
 				Op:   "remove",
-				Path: path,
+				Path: uncleanedPath,
 				Err:  syscall.EPERM,
 			}
 		}
 		if f.isDir && len(f.children) > 0 {
 			return &os.PathError{
 				Op:   "remove",
-				Path: path,
+				Path: uncleanedPath,
 				Err:  syscall.ENOTEMPTY,
 			}
 		}
+		// @todo(perms): check permissions
 		delete(m.contents, path)
 		delete(f.parent.children, path) // @todo: write tests to verify that no such references are forgotten about!!!
 		return nil
 	}
 	return &os.PathError{
 		Op:   "remove",
-		Path: path,
+		Path: uncleanedPath,
 		Err:  syscall.ENOENT,
 	}
 }
 
 func (m *FakeFileSystem) RemoveAll(path string) error {
 	return m.WalkDir(path, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		fd := d.(*FakeFileDescriptor)
 		if fd.file == m.root {
 			return &os.PathError{
@@ -439,6 +450,7 @@ func (m *FakeFileSystem) RemoveAll(path string) error {
 				Err:  syscall.EPERM,
 			}
 		}
+		// @todo(perms): check perms
 		delete(m.contents, path)
 		// technically only needed for the top-most directory, for all others
 		// the parent itself was already deleted, no need to remove the
@@ -456,7 +468,7 @@ type FakeFile struct {
 	lastMod    time.Time
 
 	parent   *FakeFile
-	children map[string]*FakeFile
+	children map[string]*FakeFile // isDir = true only
 }
 
 type FakeFileDescriptor struct {
@@ -471,6 +483,9 @@ var _ fs.DirEntry = (*FakeFileDescriptor)(nil)
 var _ fs.FileInfo = (*FakeFileDescriptor)(nil)
 
 func (m *FakeFileDescriptor) Close() error {
+	if m.closed {
+		return errors.New("invalid argument")
+	}
 	m.closed = true
 	return nil
 }
@@ -503,7 +518,7 @@ func (m *FakeFileDescriptor) Read(b []byte) (n int, err error) {
 		return 0, &os.PathError{
 			Op:   "read",
 			Path: m.file.path,
-			Err:  syscall.EISDIR,
+			Err:  syscall.EISDIR, // @fixme: wronly returns EISDIR? (check if this is correct)
 		}
 	}
 	if m.cursor >= int64(len(m.file.bytes)) {
@@ -576,7 +591,6 @@ func (m *FakeFileDescriptor) Seek(offset int64, whence int) (int64, error) {
 func (m *FakeFileDescriptor) Info() (fs.FileInfo, error) {
 	// "The returned FileInfo may be from the time of the original directory read [...]"
 	// -- go doc fs.DirEntry
-
 	// m implements fs.FileInfo
 	return m, nil
 }
